@@ -1,0 +1,998 @@
+---
+title: "Fitting Growth Curves to Estimated Tuber Weight (2024)"
+author: "Yuto Imachi"
+output: html_document
+---
+
+```{r}
+script_name <- "032_2024_TW_Forecasting"
+```
+
+# Project Setup
+```{r}
+project_dir <- normalizePath("..")
+data_dir <- file.path(project_dir, "01_data")
+output_dir <- file.path(project_dir, "outputs")
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir)
+}
+
+# Script-specific directories
+midstream_dir <- file.path(output_dir, script_name, "midstream")
+results_dir   <- file.path(output_dir, script_name, "results")
+
+# Create directories recursively (parents=True 相当)
+dir.create(midstream_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+# Import Libraries
+```{r}
+library(tidyverse)
+library(nlme)
+
+library(ggplot2)
+```
+
+
+# Data Loading and Preprocessing
+## _Obsearved Data 
+```{r}
+rawdata_path = file.path(data_dir,
+                         "FT_2024_df.csv") # 2023用
+df_raw = read.csv(rawdata_path, header = T)
+df_raw = df_raw[,seq(2,length(colnames(df_raw)))]
+df_raw[1:10,]
+```
+
+```{r}
+df <- df_raw
+cols_Label <- c(
+  "Temperature",
+  "Density",
+  "block",
+  "subblock",
+  "ridge",
+  "plot",
+  "plot_ridge_ind",
+  "HarvTime"
+)
+
+df[cols_Label] <- lapply(df[cols_Label], as.factor)
+df["block"] <- lapply(df["block"], as.character)
+df[df$block == "TRUE","block"] <- "T"
+
+df$Temperature <- factor(df$Temperature, levels = c("Low", "Mid-Short", "Mid-Long", "High")) 
+df$Density <- factor(df$Density, levels = c("sparse", "standard", "dense")) 
+df$block<- factor(df$block)
+
+df[is.na(df)] <- 0
+df <- arrange(df, df$block, df$DAS, df$plot, df$ridge)
+df[1:10,]
+```
+
+```{r}
+df2 <- df
+df2[cols_Label] <- lapply(df2[cols_Label], as.factor)
+df2$DAS <- as.integer(as.character(df2$DAS))
+df2[1:10,]
+```
+
+## _Load Estimation Results
+```{r}
+year_now <- "2024"
+
+model_timestamp_config_df <- read.csv(
+  file.path(data_dir, "0_model_timestamp_config.csv"),
+  row.names = 1,header = TRUE,
+  stringsAsFactors = FALSE,
+  colClasses = "character",
+  check.names = FALSE
+)
+model_timestamp_config_df[] <- lapply(
+  model_timestamp_config_df,
+  function(x) gsub('"', "", x)
+)
+
+modeltime_now <- model_timestamp_config_df["RandomCV", year_now]
+```
+
+```{r}
+modeltime_now_dir <-file.path(output_dir, 
+                              "022_2024_TW_Estimation", 
+                              "results", 
+                              paste0("merge_pred_df_melt_",modeltime_now)
+)
+modeltime_now_dir
+```
+
+```{r}
+results_modeltime_now_dir <- paste0(results_dir,"/",
+                                    "modeltime_now", "_", modeltime_now, "/")
+dir.create(results_modeltime_now_dir)
+```
+
+```{r}
+eval_df_all <- data.frame(stra_name = character(0),
+                          fitting_name = character(0),
+                          r = character(0),
+                          r2 = character(0),
+                          RMSE = character(0))
+```
+
+```{r}
+stra_names_li <- read.csv(file.path(modeltime_now_dir, "stra_names_df.csv"))["stra_names"][,1]
+stra_names_li <-stra_names_li[
+  grepl("ImgType-Full", stra_names_li) &
+    grepl("SampRate-100", stra_names_li) &
+    grepl("SampMetho-random", stra_names_li)
+]
+
+for (stra_i in 1:length(stra_names_li)){
+  if (stra_i !=1){
+    next
+  }
+  stra_name_now <- stra_names_li[stra_i]
+}
+```
+
+```{r}
+stra_names_li
+```
+
+```{r}
+get_ml_pred_df <- function(modeltime_now_dir,stra_name_now){
+  ml_pred_df <- read.csv(paste0(modeltime_now_dir,"/",
+                                stra_name_now,".csv"), 
+                         header = T, row.names = 1)
+
+  
+  ml_pred_df[cols_Label] <- lapply(ml_pred_df[cols_Label], as.factor)
+
+  ml_pred_df$Temperature <- factor(ml_pred_df$Temperature, levels = c("Low", "Mid-Short", "Mid-Long", "High")) 
+  ml_pred_df$Density <- factor(ml_pred_df$Density, levels = c("sparse", "standard", "dense")) 
+  
+  y <- "Wei_all_per_m2"
+  
+  ml_pred_df <- ml_pred_df %>%
+  select(-DAS)
+  
+  ml_pred_df <- ml_pred_df %>%
+    rename(c("DAS" = pred_DAS)) %>%
+    rename(!!y := value) %>%
+    select(-c( index)) 
+  
+  pl_ri_in_li <- sort(unique(ml_pred_df$plot_ridge_ind))
+  pl_ri_in_ord <- factor(pl_ri_in_li, levels = pl_ri_in_li)
+  
+  return(ml_pred_df)
+}
+```
+
+```{r}
+ml_pred_df <- get_ml_pred_df(modeltime_now_dir,stra_name_now)
+ml_pred_df[1:10,]
+```
+
+## _Define Evaluation Metric Functions
+```{r}
+RMSE <- function(ob, pre){
+  temp <- sqrt(mean((ob-pre)^2))
+  return(temp)
+}
+```
+
+```{r}
+R2 <- function(ob, pre) {
+  ss_total <- sum((ob - mean(ob))^2)    
+  ss_residual <- sum((ob - pre)^2)     
+  r2 <- 1 - (ss_residual / ss_total)   
+  return(r2)
+}
+```
+
+## _Creating Grouped Data
+```{r}
+make_grouped_byplot <- function(Test_alp, df, CV = FALSE, inp_HT = "5", future_day, debag = FALSE){
+  fct2_df <- df
+  ml_pred_df <- df
+  if (CV == T){
+    Train_alp <- LETTERS[1:4][!(LETTERS[1:4] %in% Test_alp)]
+  
+    fct2_df <- ml_pred_df[!((ml_pred_df$HarvTime == "6") & (ml_pred_df$Group %in% Test_alp) & (ml_pred_df$DAS == future_day)),] 
+  }
+  
+  if (inp_HT == "5"){
+    fct2_df <- fct2_df[!((fct2_df$DAS == future_day)), ]
+  }
+
+  fct2_df <- fct2_df[(fct2_df$HarvTime == "5")|(fct2_df$HarvTime == "6"),]
+
+  y <- "Wei_all_per_m2" 
+  if (debag == TRUE) print(y)
+
+  
+  df_now <- fct2_df[,c(y,"Temperature", "Density", "subblock","HarvTime", "DAS", "plot_ridge_ind")] 
+  df_now$Temperature <- factor(df_now$Temperature,levels = c("Low", "Mid-Short", "Mid-Long", "High"))
+  df_now$Density <- factor(df_now$Density,levels = c("sparse", "standard", "dense"))
+  df_now$block <- ordered(as.factor(df_now$subblock))
+  
+  df_now$DAS <- df_now$DAS
+  df_now$ind <- df_now$plot_ridge_ind
+  df_now$ind <- ordered(as.factor(df_now$ind))
+  df_now <- df_now[!is.na(df_now[,y]),]
+  
+  fml_now <- paste(y, "~", "block + Temperature + Density + HarvTime + DAS + ind ", sep = "") 
+  df_agg_now <- aggregate(as.formula(fml_now) , data = df_now, FUN = mean)
+  df_agg_now$Temperature <- factor(df_agg_now$Temperature,levels = c("Low", "Mid-Short", "Mid-Long", "High"))
+  df_agg_now$Density <- factor(df_agg_now$Density,levels = c("sparse", "standard", "dense"))
+  
+  
+  df_now <- arrange(df_now, plot_ridge_ind, DAS)
+  if (debag == TRUE) print(df_now[1:10,])
+  
+  ## Reshape Data for nlme Mixed-Effects Model
+  FML_1 <- paste(y, "~", "DAS|ind", sep = "") 
+  DF_now <- groupedData(as.formula(FML_1), 
+                        data = df_agg_now,
+                        outer = ~ Temperature*Density
+                        )
+  
+  plot(DF_now, outer = ~ Temperature*Density, inner = ~block, layout = c(4,3), aspect = 0.75,key = NULL)
+  
+  return(DF_now)
+}
+```
+
+
+```{r}
+Test_alp <- c("B")
+CV_TorF <- F
+future_day <- 109
+DF_now <- make_grouped_byplot(Test_alp = Test_alp,
+                              df = ml_pred_df, 
+                              CV = CV_TorF, 
+                              future_day = future_day, 
+                              debag = TRUE)
+```
+
+```{r}
+make_plot_obs <- function(DF_now, df2, stra_name_now) {
+  g <- ggplot(NULL)
+  g <- g + geom_line(data = DF_now, aes(x = DAS, y = Wei_all_per_m2, group = ind)) 
+  g <- g + geom_point(data = DF_now, aes(x = DAS, y = Wei_all_per_m2, group = ind))
+  g <- g + theme_bw()
+  g <- g + geom_point(data = df2[df2$HarvTime == "6", ], aes(x = DAS, y = Wei_all_per_m2), shape = 21)
+  ggsave(paste0(results_modeltime_now_dir, "obs", "_", stra_name_now, ".png"), g)
+}
+
+```
+
+```{r}
+make_plot_obs(DF_now, df2, stra_name_now)
+```
+
+# Fitting the growth curve
+## _Separate (nlsList) Growth Curve Fitting
+```{r}
+fitting_name_now <- "nlsList"
+```
+
+```{r}
+y <- "Wei_all_per_m2"
+model_now <-  paste0(y, " ~ SSgompertz(DAS, Asym,b2,b3)")
+model_formula <- as.formula(model_now)
+
+fit_nlsList <- function(df,y,model_formula){
+  DF_now <- df
+
+  fmlnow_lis <- nlsList(model_formula, 
+                      data = DF_now)
+  fmlnow_lis 
+  plot(intervals(fmlnow_lis), layout = c(3,1))
+  return(fmlnow_lis)
+}
+```
+
+
+```{r}
+fmlnow_lis <- fit_nlsList(DF_now,y, model_formula)  
+fmlnow_lis
+```
+
+```{r}
+cal_future_y_nlsList <- function(DF_now, fmlnow_lis, future_day){
+  pred_df <- data.frame(plot_ridge_ind = rownames(coef(fmlnow_lis)), Prediction = NA)
+  for(i in 1:length(unique(DF_now$ind))) {
+    coef_i <- coef(fmlnow_lis)[i, ]
+    pred_df$Prediction[i] <- SSgompertz(future_day, coef_i[1, "Asym"], coef_i[1, "b2"], coef_i[1, "b3"])
+  }
+  return(pred_df)
+}
+```
+
+```{r}
+pred_df_nlsList <- cal_future_y_nlsList(DF_now, fmlnow_lis, future_day)
+pred_df_nlsList[1:10,]
+```
+
+### __Visualization of Separate Model Results
+```{r}
+make_plot_nlsList <- function(df2, DF_now, fmlnow_lis, stra_name_now, future_day){
+  
+  png(paste0(results_modeltime_now_dir, "nlsList", "_", stra_name_now, ".png"), width = 450, height = 400)
+  plot(DF_now$DAS, DF_now$Wei_all_per_m2,
+       main = "Gompertz Curve for Each plot", xlab = "", ylab = "",
+       xlim= range(0,120), ylim = range(0, 7000),
+       pch = 0)
+  par(new = T)
+  
+  plot(rep(future_day,length(df2[df2$HarvTime==6, y])), df2[df2$HarvTime==6, y], 
+
+       xlab = "", ylab = "", xlim= range(0,120), ylim = range(0, 7000),
+       pch = 4)
+  par(new = T)
+
+  DAS_seq <- seq(0, max(DF_now$DAS), length.out = 100)
+  DAS_seq_fu <- seq(max(DF_now$DAS), 120, length.out = 100)
+  
+  
+  for(i in 1:length(unique(DF_now$ind))) {
+    coef_i <- coef(fmlnow_lis)[i, ]
+    pred <- SSgompertz(DAS_seq, coef_i[1, "Asym"], coef_i[1, "b2"], coef_i[1, "b3"])
+    lines(DAS_seq, pred, lwd = 0.5, lty = 1) 
+    pred_fu <- SSgompertz(DAS_seq_fu, coef_i[1, "Asym"], coef_i[1, "b2"], coef_i[1, "b3"])
+    lines(DAS_seq_fu, pred_fu, col = "grey", lwd = 0.5, lty = 2) 
+  
+    
+  }
+  dev.off()
+}
+```
+
+```{r}
+make_plot_nlsList(df2, DF_now, fmlnow_lis, stra_name_now, future_day)
+```
+
+```{r}
+make_compe_df <- function(pred_df, df2){
+  compe_df <- left_join(pred_df, df2[c(cols_Label, y)], by = "plot_ridge_ind") 
+}
+```
+
+```{r}
+compe_df_nlsList <- make_compe_df(pred_df_nlsList, df2)
+```
+
+
+```{r}
+get_eval_values <- function(compe_df, stra_name_now, fitting_name, isnull = FALSE){
+  if (isnull==FALSE){
+    
+    cor_now <- (cor(compe_df$Wei_all_per_m2, compe_df$Prediction))
+    r2_now <- (R2(compe_df$Wei_all_per_m2, compe_df$Prediction)) 
+    RMSE_now <- (RMSE(compe_df$Wei_all_per_m2, compe_df$Prediction))　
+    
+    eval_df <- data.frame(stra_name = stra_name_now,
+                          fitting_name = fitting_name,
+                          r = cor_now,
+                          r2 = r2_now,
+                          RMSE = RMSE_now)    
+  }
+  
+  if (isnull==TRUE){
+    cor_now <- NA
+    r2_now <- NA
+    RMSE_now <- NA
+    eval_df <- data.frame(stra_name = stra_name_now,
+                          fitting_name = fitting_name,
+                          r = cor_now,
+                          r2 = r2_now,
+                          RMSE = RMSE_now)        
+  }
+  
+  return(eval_df)
+}
+```
+
+```{r}
+eval_df_nlsList <- get_eval_values(compe_df_nlsList, stra_name_now, fitting_name_now, isnull = FALSE)
+eval_df_nlsList
+```
+
+
+```{r}
+eval_df_all <- rbind(eval_df_all, eval_df_nlsList)
+eval_df_all
+```
+
+```{r}
+make_scatter <- function(compe_df, eval_df_now, fitting_name_now){
+  
+  x_vals <- 1:10000
+  
+  cor_now <- eval_df_now$r
+  r2_now <- eval_df_now$r2
+  RMSE_now <- eval_df_now$RMSE
+  
+  g <- ggplot(compe_df, aes(x=Wei_all_per_m2, y=Prediction))
+  g <- g + geom_point() 
+  g <- g + geom_abline(slope = 1, intercept = 0) 
+  g <- g + xlab("observed") + ylab("predicted")
+  g <- g + xlim(c(2500,8000)) + ylim(c(2500, 8000)) + theme(aspect.ratio = 1)
+  g <- g + annotate("text", x = 6000, y = 4500, hjust=0, size = 5,
+                    label = paste0("r: ", as.character(round(cor_now, digits = 2)), "\n",
+                                   "R2: ", as.character(round(r2_now, digits = 2)), "\n",
+                                   "RMSE: ", as.character(round(RMSE_now, digits = 2))))
+  
+  ggsave(paste0(results_modeltime_now_dir, "scatter_",fitting_name_now, "_", stra_name_now, ".png"))
+
+}
+```
+
+```{r}
+make_scatter(compe_df_nlsList, eval_df_nlsList, fitting_name_now)
+```
+
+## _Mixed-Effects (nlme) Growth Curve Fitting
+```{r}
+fitting_name_now <- "nlme"
+```
+
+```{r}
+fit_nlme <- function(df, model_now, fmlnow_lis){
+  
+  DF_now <- df
+  fm1now_nlme <- tryCatch({
+    nlme(as.formula(model_now), 
+         data = DF_now,
+         fixed = Asym + b2 + b3 ~ 1,
+         random  = pdDiag(Asym + b2 + b3 ~ 1), 
+         na.action = NULL, 
+         naPattern = ~ !is.na(Wei_all_per_m2) ,
+         start = fixef(fmlnow_lis),
+         control = nlmeControl(maxIter = 100, niterEM = 100, tolerance = 1e-5))
+  }, error = function(e){
+    cat("error in nlme:\n", e$message, "\n")
+    NULL
+  })
+}
+```
+
+
+```{r}
+fm1now_nlme <- fit_nlme(DF_now, model_now, fmlnow_lis) 
+fm1now_nlme
+```
+
+
+```{r}
+cal_future_y_nlme <- function(DF_now, fm1now_nlme, future_day){
+  
+  fixed_effects <- fixef(fm1now_nlme)
+  random_effects <- ranef(fm1now_nlme)
+
+  pred_df <- data.frame(plot_ridge_ind = rownames(random_effects), Prediction = NA) 
+  DAS_seq <- seq(0, max(DF_now$DAS), length.out = 100)
+  DAS_seq_fu <- seq(max(DF_now$DAS), 120, length.out = 100)
+  
+  for(i in 1:nrow(random_effects)) {
+    Asym_i <- fixed_effects["Asym"] + random_effects[i, "Asym"]
+    b2_i <- fixed_effects["b2"] + random_effects[i, "b2"]
+    b3_i <- fixed_effects["b3"] + random_effects[i, "b3"]
+    pred_i <- SSgompertz(DAS_seq, Asym_i, b2_i, b3_i )
+    pred_i_fu <- SSgompertz(DAS_seq_fu, Asym_i, b2_i, b3_i )
+    pred_df$Prediction[i] <- SSgompertz(future_day, Asym_i, b2_i, b3_i)
+  }
+  
+  return(pred_df)
+}
+```
+
+```{r}
+pred_df_nlme <- cal_future_y_nlme(DF_now, fm1now_nlme, future_day)
+pred_df_nlme[1:10,]
+```
+
+
+### __Visualization of Mixed-Effects Model Results
+```{r}
+make_plot_nlme <- function(df2, DF_now, fm1now_nlme, stra_name_now, future_day){
+  
+  png(paste0(results_modeltime_now_dir, "nlme", "_", stra_name_now, ".png"), width = 450, height = 400)
+  plot(DF_now$DAS, DF_now$Wei_all_per_m2,
+       main = "Gompertz Curve for Each plot", xlab = "", ylab = "",
+       xlim= range(0,120), ylim = range(0, 7000),
+       pch = 0)
+  par(new = T)
+  
+  plot(rep(future_day,length(df2[df2$HarvTime==6, y])), df2[df2$HarvTime==6, y], 
+       
+       xlab = "", ylab = "", xlim= range(0,120), ylim = range(0, 7000),
+       pch = 4)
+  par(new = T)
+
+  DAS_seq <- seq(0, max(DF_now$DAS), length.out = 100)
+  DAS_seq_fu <- seq(max(DF_now$DAS), 120, length.out = 100)
+  
+  fixed_effects <- fixef(fm1now_nlme)
+  random_effects <- ranef(fm1now_nlme)
+  
+  for(i in 1:nrow(random_effects)) {
+    Asym_i <- fixed_effects["Asym"] + random_effects[i, "Asym"]
+    b2_i <- fixed_effects["b2"] + random_effects[i, "b2"]
+    b3_i <- fixed_effects["b3"] + random_effects[i, "b3"]
+    pred_i <- SSgompertz(DAS_seq, Asym_i, b2_i, b3_i )
+    pred_i_fu <- SSgompertz(DAS_seq_fu, Asym_i, b2_i, b3_i )
+    lines(DAS_seq, pred_i, col = "black", lwd = 0.25, lty = 1)
+    lines(DAS_seq_fu, pred_i_fu, col = "grey", lwd = 0.25, lty = 2)
+
+  }
+  dev.off()
+}
+```
+
+```{r}
+make_plot_nlme(df2, DF_now, fm1now_nlme, stra_name_now, future_day)
+```
+
+```{r}
+compe_df_nlme <- make_compe_df(pred_df_nlme, df2)
+compe_df_nlme[1:10,]
+```
+
+
+```{r}
+eval_df_nlme <- get_eval_values(compe_df_nlme, stra_name_now, fitting_name_now)
+eval_df_nlme
+```
+
+```{r}
+eval_df_all <- rbind(eval_df_all, eval_df_nlme)
+eval_df_all
+```
+
+```{r}
+make_scatter(compe_df_nlme, eval_df_nlme, fitting_name_now)
+```
+
+## _Run nls and nlme Models in a Loop
+```{r}
+nlslist_obj_dirname <- file.path(midstream_dir,"nlslist_obj")
+nlme_obj_dirname <- file.path(midstream_dir, "nlme_obj")
+
+dir.create(nlslist_obj_dirname)
+dir.create(nlme_obj_dirname)
+```
+
+```{r}
+for (blo_now in c("bloAll")){ 
+  eval_df_all <- data.frame(stra_name = character(0),
+                            fitting_name = character(0),
+                            r = character(0),
+                            r2 = character(0),
+                            RMSE = character(0))
+  
+  
+  for (stra_i in 1:length(stra_names_li)){
+
+    stra_name_now <- stra_names_li[stra_i]
+    print(stra_name_now)
+    ml_pred_df <- get_ml_pred_df(modeltime_now_dir,stra_name_now)
+    df2 <- df
+    df2[cols_Label] <- lapply(df2[cols_Label], as.factor)
+    
+    if (blo_now != "bloAll"){
+      ml_pred_df <- ml_pred_df[ml_pred_df$subblock == str_sub(blo_now, -1),]
+      df2 <- df2[df2$subblock == str_sub(blo_now, -1),]
+    }
+    
+    Test_alp <- c("B")
+    CV_TorF <- F
+    future_day <- 109
+    
+    DF_now <- make_grouped_byplot(Test_alp = Test_alp, df = ml_pred_df, CV = CV_TorF, future_day = future_day)
+    
+    make_plot_obs(DF_now, df2, stra_name_now)
+    
+    # nlsList
+    fitting_name_now <- "nlsList"
+    fmlnow_lis <- fit_nlsList(DF_now,y, model_formula)
+    saveRDS(fmlnow_lis, 
+            file.path(nlslist_obj_dirname, 
+                      paste0(fitting_name_now, "_" , stra_name_now, ".rds")
+            ) 
+    )
+    fmlnow_lis <- readRDS(file.path(nlslist_obj_dirname,
+                                    paste0(fitting_name_now, "_" , stra_name_now, ".rds")
+    )
+    )
+    pred_df_nlsList <- cal_future_y_nlsList(DF_now, fmlnow_lis, future_day)
+    make_plot_nlsList(df2, DF_now, fmlnow_lis, stra_name_now, future_day)
+    compe_df_nlsList <- make_compe_df(pred_df_nlsList, df2)
+    eval_df_nlsList <- get_eval_values(compe_df_nlsList, stra_name_now, fitting_name_now)
+    eval_df_all <- rbind(eval_df_all, eval_df_nlsList)
+    make_scatter(compe_df_nlsList, eval_df_nlsList, fitting_name_now)
+    
+    # nlme
+    fitting_name_now <- "nlme"
+    fm1now_nlme <- fit_nlme(DF_now, model_now, fmlnow_lis)
+    saveRDS(fm1now_nlme,
+            file.path(nlme_obj_dirname, 
+                      paste0(fitting_name_now, "_" , stra_name_now, ".rds")
+                      )
+            ) 
+    fm1now_nlme <- readRDS(file.path(nlme_obj_dirname, 
+                                     paste0(fitting_name_now, "_" , stra_name_now, ".rds")
+                                     )
+                           )
+    if (is.null(fm1now_nlme)==FALSE){
+      pred_df_nlme <- cal_future_y_nlme(DF_now, fm1now_nlme, future_day)
+      make_plot_nlme(df2, DF_now, fm1now_nlme, stra_name_now, future_day)
+      compe_df_nlme <- make_compe_df(pred_df_nlme, df2)
+      eval_df_nlme <- get_eval_values(compe_df_nlme, stra_name_now, fitting_name_now)
+      eval_df_all <- rbind(eval_df_all, eval_df_nlme)
+      make_scatter(compe_df_nlme, eval_df_nlme, fitting_name_now)
+    }
+    
+    else{
+      eval_df_nlme <- get_eval_values(compe_df_nlme, stra_name_now, fitting_name_now, isnull = TRUE)
+      eval_df_all <- rbind(eval_df_all, eval_df_nlme)
+    }
+  }
+  write.csv(x = eval_df_all,
+            file = file.path(results_modeltime_now_dir,
+                             paste0("eval_df_all", "_", blo_now, ".csv")
+            )
+  )
+}
+```
+
+
+# Making Figure in Paper
+```{r}
+anno_fig_li <- c("bloCV-Non_ImgType-Full_SampRate-100_SampMetho-random_Rep-1.csv") 
+```
+
+## _Plotting the separate model curve
+```{r}
+make_plot_nlsList4 <- function(df2, DF_now, fmlnow_lis, stra_name_now, future_day) {
+  
+  png(file.path(results_dir, 
+                paste0("pap_nlsList_", stra_name_now, ".png")
+                ),
+      width = 1800, height = 1600)
+
+  par(tcl = 1, 
+      mgp = c(3, 3, 0), 
+      mar = c(20, 20, 20, 5))  
+  plot(jitter(DF_now$DAS, amount = 1), DF_now$Wei_all_per_m2,
+       main = "Separate model in 2024",
+       xlab = "", 
+       ylab = "",
+       xlim = c(0, 120), 
+       ylim = c(0, 7000),
+       pch = 0,
+       cex = 3,
+       cex.axis = 4,
+       cex.lab = 4,
+       cex.main = 8,
+       las = 1)
+  
+  par(new = TRUE)
+
+  plot(jitter(rep(future_day, length(df2[df2$HarvTime == 6, y])), amount = 1),
+       df2[df2$HarvTime == 6, y],
+       xlab = "", ylab = "", 
+       xlim = c(0, 120), ylim = c(0, 7000),
+       pch = 4,
+       cex = 3,
+       cex.axis = 4,
+       cex.lab = 4,
+       cex.main = 8,
+       las = 1)
+  
+  par(new = TRUE)
+
+  DAS_seq <- seq(0, max(DF_now$DAS), length.out = 100)
+  DAS_seq_fu <- seq(max(DF_now$DAS), 120, length.out = 100)
+
+  for(i in 1:length(unique(DF_now$ind))) {
+    coef_i <- coef(fmlnow_lis)[i, , drop = FALSE] 
+    pred    <- SSgompertz(DAS_seq,    coef_i[1, "Asym"], coef_i[1, "b2"], coef_i[1, "b3"])
+    pred_fu <- SSgompertz(DAS_seq_fu, coef_i[1, "Asym"], coef_i[1, "b2"], coef_i[1, "b3"])
+    
+    lines(DAS_seq,    pred,    lwd = 1, lty = 1)
+    lines(DAS_seq_fu, pred_fu, col = "grey", lwd = 1, lty = 2)
+  }
+
+  title(xlab = expression("DAS (days)"), line = 8, cex.lab = 5)
+  title(ylab = expression(paste("Tuber Fresh Weight ( "*g~m^{-2}*" )")), line = 12, cex.lab = 5)
+
+  legend("topleft", 
+         legend = c("estimated value", "observed value", "fitted curve", "projected curve"), 
+         pch = c(0, 4, NA, NA), 
+         lty = c(NA, NA, 1, 2), 
+         col = c("black", "black", "black", "grey"), 
+         pt.cex = 3, 
+         cex = 5,
+         bty = "n", 
+         lwd = c(3, 3, 3, 3))
+
+  dev.off()
+}
+
+```
+
+## _Plotting the mixed model curve
+```{r}
+make_plot_nlme4 <- function(df2, DF_now, fm1now_nlme, stra_name_now, future_day) {
+  
+  png(file.path(results_dir, 
+                paste0("pap_nlme_", stra_name_now, ".png")
+                ),
+      width = 1800, height = 1600
+      )
+
+  par(tcl = 1, 
+      mgp = c(3, 3, 0), 
+      mar = c(20, 20, 20, 5))  
+  
+  plot(jitter(DF_now$DAS, amount = 1), DF_now$Wei_all_per_m2,
+       main = "Mixed-Effects Model in 2024",
+       xlab = "", 
+       ylab = "",
+       xlim = c(0, 120),
+       ylim = c(0, 7000),
+       pch = 0,
+       cex = 3,
+       cex.axis = 4,
+       cex.lab = 4,
+       cex.main = 8,
+       las = 1)
+  
+  par(new = TRUE)
+
+  plot(jitter(rep(future_day, length(df2[df2$HarvTime == 6, y])), amount = 1),
+       df2[df2$HarvTime == 6, y],
+       xlab = "", ylab = "",
+       xlim = c(0, 120), ylim = c(0, 7000),
+       pch = 4,
+       cex = 3,
+       cex.axis = 4,
+       cex.lab = 4,
+       cex.main = 8,
+       las = 1)
+
+  par(new = TRUE)
+
+  DAS_seq <- seq(0, max(DF_now$DAS), length.out = 100)
+  DAS_seq_fu <- seq(max(DF_now$DAS), 120, length.out = 100)
+
+  fixed_effects <- fixef(fm1now_nlme)
+  random_effects <- ranef(fm1now_nlme)
+
+  for(i in 1:nrow(random_effects)) {
+    Asym_i <- fixed_effects["Asym"] + random_effects[i, "Asym"]
+    b2_i   <- fixed_effects["b2"]   + random_effects[i, "b2"]
+    b3_i   <- fixed_effects["b3"]   + random_effects[i, "b3"]
+
+    pred_i    <- SSgompertz(DAS_seq,    Asym_i, b2_i, b3_i)
+    pred_i_fu <- SSgompertz(DAS_seq_fu, Asym_i, b2_i, b3_i)
+
+    lines(DAS_seq, pred_i, col = "black", lwd = 1, lty = 1)
+    lines(DAS_seq_fu, pred_i_fu, col = "grey", lwd = 1, lty = 2)
+  }
+
+  title(xlab = expression("DAS (days)"), line = 8, cex.lab = 5)
+  title(ylab = expression(paste("Tuber Fresh Weight ( "*g~m^{-2}*" )")), line = 12, cex.lab = 5)
+  
+  legend("topleft", 
+         legend = c("estimated value", "observed value", "fitted curve", "projected curve"), 
+         pch = c(0, 4, NA, NA), 
+         lty = c(NA, NA, 1, 2), 
+         col = c("black", "black", "black", "grey"), 
+         pt.cex = 3, 
+         cex = 5,
+         bty = "n", 
+         lwd = c(3, 3, 3, 3))
+
+  dev.off()
+}
+
+```
+
+
+## _Scatter Plot of Predicted vs. Observed Values
+```{r}
+make_scatter4 <- function(compe_df, eval_df_now, fitting_name_now){
+  
+  x_vals <- 1:10000
+  
+  cor_now <- eval_df_now$r
+  r2_now <- eval_df_now$r2
+  RMSE_now <- eval_df_now$RMSE
+  
+  g <- ggplot(compe_df, aes(x=Wei_all_per_m2, y=Prediction))
+  g <- g + geom_point() 
+  g <- g + geom_abline(slope = 1, intercept = 0) 
+  g <- g + xlab(expression(paste("Observed TW ( "*g~m^{-2}*" )"))) +
+         ylab(expression(paste("Predicted TW ( "*g~m^{-2}*" )"))) 
+
+  g <- g + scale_x_continuous(limits = c(1000, 8000), breaks = seq(1000, 8000, by = 1000))
+  g <- g + scale_y_continuous(limits = c(1000, 8000), breaks = seq(1000, 8000, by = 1000))
+
+  g <- g + theme_bw()
+  g <- g + theme(
+      aspect.ratio = 1,
+      axis.title = element_text(size = 20),       
+      axis.text = element_text(size = 16),        
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      axis.ticks.length = unit(-0.2, "cm"),       
+      axis.ticks = element_line(color = "black"),  
+      panel.grid.major = element_blank(),  
+      panel.grid.minor = element_blank()   
+  )
+  
+  g <- g + annotate("text", x = 1600, y = 8000, hjust = 0, vjust = 0.5, size = 6,
+                  label = sprintf("'r: %.2f'", cor_now),
+                  parse = TRUE)
+  g <- g + annotate("text", x = 1600, y = 7300, hjust = 0, vjust = 0.5, size = 6,
+                  label = sprintf("R^2: %.2f", r2_now),
+                  parse = TRUE)
+  g <- g + annotate("text", x = 1600, y = 6600, hjust = 0, vjust = 0.5, size = 6,
+                  label = sprintf("RMSE: %.0f", RMSE_now),
+                  parse = TRUE)
+  
+  plot_title <- if (fitting_name_now == "nlsList") {
+    "Separate model in 2024"
+  } else if (fitting_name_now == "nlme") {
+    "Mixed-Effects Model in 2024"
+  } else {
+    "Model in 2024"
+  }
+  g <- g + ggtitle(plot_title)
+  g <- g + theme(plot.title = element_text(size = 24, hjust = 0.5))
+  
+
+  ggsave(
+    filename = file.path(results_dir, 
+                         paste0("pap_scatter_", fitting_name_now, "_", stra_name_now, ".png")
+                         ),
+    plot = g,
+    width = 1800,
+    height = 1600,
+    units = "px",   
+    dpi = 300       
+  )
+  
+}
+```
+
+
+## _Run plotting figure function in a Loop
+```{r}
+for (blo_now in c("bloAll")){ 
+  if (!(blo_now == "bloAll")) {
+    next  
+  }
+  
+  eval_df_all <- data.frame(stra_name = character(0),
+                            fitting_name = character(0),
+                            r = character(0),
+                            r2 = character(0),
+                            RMSE = character(0))
+  
+  
+  for (stra_i in 1:length(stra_names_li)){
+
+    
+    stra_name_now <- stra_names_li[stra_i]
+    if (!(stra_name_now %in% anno_fig_li)) {
+    next  
+    }
+    
+    print(stra_name_now)
+    
+    ml_pred_df <- get_ml_pred_df(modeltime_now_dir,stra_name_now)
+    df2 <- df
+    df2[cols_Label] <- lapply(df2[cols_Label], as.factor)
+    
+    if (blo_now != "bloAll"){
+      ml_pred_df <- ml_pred_df[ml_pred_df$subblock == str_sub(blo_now, -1),]
+      df2 <- df2[df2$subblock == str_sub(blo_now, -1),]
+    }
+    
+    Test_alp <- c("B")
+    CV_TorF <- F
+    future_day <- 109
+    
+    DF_now <- make_grouped_byplot(Test_alp = Test_alp, df = ml_pred_df, CV = CV_TorF, future_day = future_day)
+    
+
+    make_plot_obs(DF_now, df2, stra_name_now)
+    
+    # nlsList
+    fitting_name_now <- "nlsList"
+    fmlnow_lis <- readRDS(file.path(nlslist_obj_dirname,
+                                    paste0(fitting_name_now, "_" , stra_name_now, ".rds")
+                                    )
+                          )
+    pred_df_nlsList <- cal_future_y_nlsList(DF_now, fmlnow_lis, future_day)
+    make_plot_nlsList4(df2, DF_now, fmlnow_lis, stra_name_now, future_day)
+    compe_df_nlsList <- make_compe_df(pred_df_nlsList, df2)
+    eval_df_nlsList <- get_eval_values(compe_df_nlsList, stra_name_now, fitting_name_now)
+    eval_df_all <- rbind(eval_df_all, eval_df_nlsList)
+    make_scatter4(compe_df_nlsList, eval_df_nlsList, fitting_name_now)
+    
+    # nlme
+    fitting_name_now <- "nlme"
+    fm1now_nlme <- readRDS(file.path(nlme_obj_dirname,
+                                     paste0(fitting_name_now, "_" , stra_name_now, ".rds")
+                                     )
+                           )
+    if (is.null(fm1now_nlme)==FALSE){
+      pred_df_nlme <- cal_future_y_nlme(DF_now, fm1now_nlme, future_day)
+      make_plot_nlme4(df2, DF_now, fm1now_nlme, stra_name_now, future_day)
+      compe_df_nlme <- make_compe_df(pred_df_nlme, df2)
+      eval_df_nlme <- get_eval_values(compe_df_nlme, stra_name_now, fitting_name_now)
+      eval_df_all <- rbind(eval_df_all, eval_df_nlme)
+      make_scatter4(compe_df_nlme, eval_df_nlme, fitting_name_now)
+    }
+    
+    else{
+      eval_df_nlme <- get_eval_values(compe_df_nlme, stra_name_now, fitting_name_now, isnull = TRUE)
+      eval_df_all <- rbind(eval_df_all, eval_df_nlme)
+    }
+  }
+
+}
+```
+
+## _Create Table of Mean Evaluation Metrics for Tuber Weight Forecasts
+```{r}
+blo_now <- c("bloAll")
+eval_df_all_raw <- read.csv(file.path(results_dir, 
+                                      paste0("modeltime_now", "_", modeltime_now, "/",
+                                             "eval_df_all", "_", blo_now, ".csv")
+                                      )
+                            )
+eval_df_all_raw
+```
+
+
+```{r}
+eval_df_all <- eval_df_all_raw%>%
+  mutate(stra_name = str_remove(stra_name, "\\.csv$")) %>% 
+  separate(stra_name, into = c("bloCV", "ImgType", "SampRate", "SampMetho", "Rep"),
+           sep = "_", remove = FALSE) %>%
+  mutate(
+    bloCV = sub("bloCV-", "", bloCV),
+    ImgType = sub("ImgType-", "", ImgType),
+    SampRate = as.integer(sub("SampRate-", "", SampRate)),
+    SampMetho = sub("SampMetho-", "", SampMetho),
+    Rep = sub("Rep-", "", Rep)
+  ) 
+print(eval_df_all)
+```
+
+Averaging Across Three Replicates
+```{r}
+summa_eval_df_all <- eval_df_all %>% 
+  group_by(bloCV,ImgType, SampRate, SampMetho, fitting_name) %>% 
+  summarise(
+    mean_r2 = mean(r2, na.rm = TRUE),
+    mean_r = mean(r, na.rm = TRUE),
+    mean_RMSE = mean(RMSE, na.rm = TRUE),
+    sd_r2 = sd(r2, na.rm = TRUE),
+    sd_r = sd(r, na.rm = TRUE),
+    sd_RMSE = sd(RMSE, na.rm = TRUE),
+    .groups = "drop"
+  ) %>% 
+  mutate(group = paste(ImgType, SampMetho, fitting_name,sep = "_"))
+write.csv(summa_eval_df_all, file.path(results_modeltime_now_dir, 
+                                       paste0("summa_eval_df_all.csv")
+                                       )
+          )
+summa_eval_df_all 
+```

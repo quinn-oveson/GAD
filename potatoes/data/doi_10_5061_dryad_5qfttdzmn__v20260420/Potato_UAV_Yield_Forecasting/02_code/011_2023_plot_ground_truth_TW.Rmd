@@ -1,0 +1,94 @@
+---
+title: "Plot of ground-truth tuber fresh weight (2023)"
+author: "Yuto Imachi"
+output: html_document
+---
+
+# Project Setup
+```{r}
+project_dir <- normalizePath("..")
+data_dir <- file.path(project_dir, "01_data")
+output_dir <- file.path(project_dir, "outputs")
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir)
+}
+```
+
+# Import Libraries
+```{r}
+library(dplyr)
+library(ggplot2)
+```
+
+# Data Loading and Preprocessing
+## > Obsearved Data
+```{r}
+df <- read.csv(paste0(data_dir, "/", "TW_2023_df.csv"), row.names = 1)
+df <- df %>%
+  select(
+    ID4human = PlotID,
+    Origin,
+    Density,
+    DAS,
+    Wei_all_per_m2
+  )
+df
+```
+
+# Plot of ground-truth tuber fresh weight
+```{r, fig.width=6, fig.height=4}
+df_mean_sd <- df %>% 
+  group_by(Origin, Density, DAS) %>% 
+  summarise(mean= mean(Wei_all_per_m2, na.rm = TRUE),
+            sd = sd(Wei_all_per_m2, na.rm = TRUE),
+            DAS = mean(DAS),
+            .groups = "drop") %>% 
+  as.data.frame()
+
+make_lineplot_raw <- function(df, df_mean_sd){
+  df$DAS <- as.integer(as.character(df$DAS))
+  
+  p <-ggplot(NULL) + theme_bw() + 
+  
+    geom_line(data = df_mean_sd,
+              aes(x = DAS, 
+                  y = mean, 
+                  colour = Origin, 
+                  linetype = Density)) + 
+    geom_point(data = df_mean_sd,
+                  aes(x = DAS, 
+                      y = mean, 
+                      colour = Origin,
+                      shape = Density),
+                  size = 2  
+               ) + 
+    scale_x_continuous(limits = c(30, 120), breaks = seq(30, 120, by = 20)) +  
+    scale_y_continuous(limits = c(0, 6000), breaks = seq(0, 6000, by = 1000)) +  
+    scale_color_discrete(guide="legend") + 
+
+    theme(
+      text = element_text(size = 14),
+      legend.text = element_text(size = 14),
+      legend.box = "horizontal",
+      legend.position = c(0.3, 0.8), 
+      legend.background = element_blank(),
+      panel.grid.major = element_blank(), 
+      panel.grid.minor = element_blank(),  
+      axis.ticks.length = unit(-0.05, "inches") 
+    ) + 
+    xlab(expression(paste("DAS(",days,")"))) + 
+    ylab(expression(paste("Tuber Fresh Weight ( "*g~m^{-2}*" )")))
+  
+  ggsave(paste0(output_dir,"/", "raw_data_2023", ".png"),
+         width = 6, height = 4, unit = "in")
+  p
+}
+
+make_lineplot_raw(df, df_mean_sd)
+```
+
+
+
+
+
+
