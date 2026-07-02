@@ -10,3 +10,4 @@ pip install tqdm
 pip install seaborn
 pip install torch
 pip install neural-tangents
+pip install torchvision
