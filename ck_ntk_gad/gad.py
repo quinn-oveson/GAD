@@ -2,22 +2,24 @@
 
     python gad.py                      # train, decompose, plot
     python gad.py --config-of gad.png  # print the config a saved plot was made with
+    python gad.py --config other.py --out f1   # another config file / output folder
 
 Each run gets its own folder, runs/<time>_<settings>/, holding
 
-    gad.png       the plot
+    gad.png       the GAD plot
+    fit.png       the network, CK and NTK fits against the true function
     config.py     verbatim copy of config.py as it was when the run started
     run.json      the same settings as plain values, the git commit, and summary numbers
-    results.npz   the curves in the plot, for replotting without rerunning
+    results.npz   the curves in both plots, for replotting without rerunning
 
 The contents of run.json (config.py source included) are also written into the
-metadata of gad.png, so a plot that has been copied out of its folder can still be
+metadata of both plots, so a plot that has been copied out of its folder can still be
 traced back with --config-of.
 """
 import argparse
+import importlib.util
 import inspect
 import json
-import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -28,13 +30,26 @@ import numpy as np
 import torch
 from torch.func import functional_call, jacrev, vmap
 
+HERE = Path(__file__).resolve().parent
+PNG_KEY = "gad_run"
+
+parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+parser.add_argument("--config-of", metavar="PNG",
+                    help="print the config a saved plot was made with and exit")
+parser.add_argument("--config", metavar="FILE", help="use this file instead of config.py")
+parser.add_argument("--out", metavar="DIR", default=HERE / "runs", type=Path,
+                    help="folder the run folder is created in (default: runs)")
+args = parser.parse_args() if __name__ == "__main__" else parser.parse_args([])
+
+if args.config:
+    # has to happen before model.py and train.py do `import config`
+    spec = importlib.util.spec_from_file_location("config", args.config)
+    sys.modules["config"] = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sys.modules["config"])
+
 import config
 import train
 from train import test_norm
-
-HERE = Path(__file__).resolve().parent
-RUNS_DIR = HERE / "runs"
-PNG_KEY = "gad_run"
 
 
 def jacobian(model, x):
@@ -101,10 +116,16 @@ def column_order(n_params, n_ck):
 def gad_sweep(model, data):
     J_train, J_test = jacobian(model, data.x_train), jacobian(model, data.x_test)
     n_params = J_train.shape[1]
+    n_ck = config.WIDTH + 1
     gamma = fit_subset(J_train, data.y_train, data.w_train, torch.arange(n_params))
     f_ntk_test = J_test @ gamma
+    # CK machine: the same fit to the data using only the last layer's columns
+    ck_cols = torch.arange(n_params - n_ck, n_params)
+    f_ck_test = J_test[:, ck_cols] @ fit_subset(J_train, data.y_train, data.w_train, ck_cols)
+    with torch.no_grad():
+        f_nn_test = model(data.x_test)
+    fits = {"network": f_nn_test, "CK": f_ck_test, "NTK": f_ntk_test}
 
-    n_ck = config.WIDTH + 1
     order = column_order(n_params, n_ck)
     sizes = sweep_sizes(len(data.x_train), n_params, n_ck)
     rows = []
@@ -115,22 +136,25 @@ def gad_sweep(model, data):
         risk = test_norm(fd + fa + fm, data.w_test) ** 2
         rows.append([risk, pd.norm().item(), pa.norm().item(),
                      pm.norm().item(), A_norm, rank])
-
-    with torch.no_grad():
-        nn_err = test_norm(model(data.x_test) - data.y_test, data.w_test)
     rows = np.array(rows)
+
     summary = {
         "n_params": n_params,
         "n_ck": n_ck,
         "jacobian_rank": torch.linalg.matrix_rank(
             data.w_train.sqrt() * J_train, rtol=config.RCOND).item(),
-        "nn_test_error": nn_err,
+        "nn_test_error": test_norm(f_nn_test - data.y_test, data.w_test),
+        "ck_test_error": test_norm(f_ck_test - data.y_test, data.w_test),
         "ntk_test_error": test_norm(f_ntk_test - data.y_test, data.w_test),
     }
     if config.COLUMN_ORDER == "ck_first":
         # modeled = CK, unmodeled = rest of the NTK: the test-norm gap between the two machines
         summary["ck_vs_ntk_test_error"] = float(rows[sizes == n_ck, 0][0] ** 0.5)
-    return sizes, rows, summary
+    return sizes, rows, summary, fits
+
+
+def stamp(fig, run_id):
+    fig.text(0.995, 0.005, run_id, ha="right", va="bottom", fontsize=6, color="gray")
 
 
 def plot_gad(sizes, rows, summary, run_id):
@@ -145,7 +169,23 @@ def plot_gad(sizes, rows, summary, run_id):
         ax.axvline(summary["n_ck"], color="gray", ls=":")   # modeled set is exactly the CK
     ax.set_xlabel("number of modeled parameters")
     ax.legend()
-    fig.text(0.995, 0.005, run_id, ha="right", va="bottom", fontsize=6, color="gray")
+    stamp(fig, run_id)
+    return fig
+
+
+def plot_fit(data, fits, run_id):
+    x = data.x_test.numpy()
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(7, 6), sharex=True)
+    ax1.plot(x, data.y_test.numpy(), "k-", lw=3, alpha=0.3, label="true function")
+    for (name, f), style in zip(fits.items(), ["-", "--", ":"]):
+        ax1.plot(x, f.numpy(), style, label=name)
+        ax2.plot(x, (f - data.y_test).abs().numpy(), style, label=name)
+    # keep the true function visible when a fit blows up; the error panel shows the full size
+    lo, hi = data.y_test.min().item(), data.y_test.max().item()
+    ax1.set_ylim(lo - 0.25 * (hi - lo), hi + 0.25 * (hi - lo))
+    ax1.legend()
+    ax2.set_yscale("log"); ax2.set_ylabel("|error|"); ax2.set_xlabel("x")
+    stamp(fig, run_id)
     return fig
 
 
@@ -189,33 +229,33 @@ def config_of(png_path):
 def main():
     # read config.py before the long computation so later edits can't leak into the record
     config_source = Path(config.__file__).read_text()
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_id = (f"{stamp}_{config.TARGET.__name__}_{config.ACTIVATION.__name__.lower()}"
-              f"_w{config.WIDTH}_d{config.DEPTH}_n{config.N_TRAIN}{config.TRAIN_SPACING}_{config.COLUMN_ORDER}")
+    now = datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_id = (f"{now}_{config.TARGET.__name__}_{config.ACTIVATION.__name__.lower()}"
+              f"_w{config.WIDTH}_d{config.DEPTH}_n{config.N_TRAIN}{config.TRAIN_SPACING}"
+              f"_{config.COLUMN_ORDER}")
 
     model, data = train.run()
-    sizes, rows, summary = gad_sweep(model, data)
+    sizes, rows, summary, fits = gad_sweep(model, data)
 
     record = {"run_id": run_id, "config": config_values(), "git": git_state(),
               "summary": summary, "config_source": config_source}
-    run_dir = RUNS_DIR / run_id
+    run_dir = args.out / run_id
     run_dir.mkdir(parents=True)
     (run_dir / "config.py").write_text(config_source)
     (run_dir / "run.json").write_text(json.dumps(record, indent=2))
     np.savez(run_dir / "results.npz", sizes=sizes, rows=rows,
-             columns=["risk", "data", "alias", "model", "A_norm", "rank"])
-    fig = plot_gad(sizes, rows, summary, run_id)
-    fig.savefig(run_dir / "gad.png", dpi=200, metadata={PNG_KEY: json.dumps(record)})
+             columns=["risk", "data", "alias", "model", "A_norm", "rank"],
+             x_test=data.x_test.numpy(), y_test=data.y_test.numpy(),
+             **{f"fit_{name}": f.numpy() for name, f in fits.items()})
+    metadata = {PNG_KEY: json.dumps(record)}
+    plot_gad(sizes, rows, summary, run_id).savefig(run_dir / "gad.png", dpi=200, metadata=metadata)
+    plot_fit(data, fits, run_id).savefig(run_dir / "fit.png", dpi=200, metadata=metadata)
 
     print(json.dumps(summary, indent=2))
     print("saved", run_dir)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("--config-of", metavar="PNG",
-                        help="print the config a saved plot was made with and exit")
-    args = parser.parse_args()
     if args.config_of:
         config_of(args.config_of)
     else:

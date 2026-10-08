@@ -44,3 +44,8 @@ COLUMN_ORDER = "ck_first"   # order parameters become "modeled" in: "ck_first" o
                             # "ck_first": last layer (the CK features), then all earlier layers
 RCOND = 1e-14               # relative cutoff for singular values
 SEED = 0                    # network init, random training points, column order
+
+# ---- set by run_experiments.py ----
+TARGET = f1
+ACTIVATION = nn.ReLU
+COLUMN_ORDER = 'random'

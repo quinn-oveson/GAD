@@ -1,0 +1,38 @@
+{
+  "run_id": "20261008-074320_f3coef5_relu_w128_d3_n201even_ck_first",
+  "config": {
+    "TARGET": {
+      "name": "f3coef5",
+      "source": "def f3coef5(x):\n    return torch.cos(torch.exp(5 * x))\n"
+    },
+    "INTERVAL": [
+      -1.0,
+      1.0
+    ],
+    "TRAIN_SPACING": "even",
+    "N_TRAIN": 201,
+    "N_TEST": 601,
+    "WIDTH": 128,
+    "DEPTH": 3,
+    "ACTIVATION": "ReLU",
+    "EPOCHS": 2400,
+    "LR": 0.001,
+    "COLUMN_ORDER": "ck_first",
+    "RCOND": 1e-14,
+    "SEED": 0
+  },
+  "git": {
+    "commit": "7d2aea56a0e44574dc9123a633617063445df79a",
+    "uncommitted_changes": true
+  },
+  "summary": {
+    "n_params": 33409,
+    "n_ck": 129,
+    "jacobian_rank": 135,
+    "nn_test_error": 0.5349062452956658,
+    "ck_test_error": 0.8461990369579138,
+    "ntk_test_error": 0.6268520426493249,
+    "ck_vs_ntk_test_error": 0.8370775505278818
+  },
+  "config_source": "\"\"\"Settings for one experiment. Edit this file, then run `python gad.py`.\n\nEvery run of gad.py saves a verbatim copy of this file next to the plot it made\n(see the docstring of gad.py), so there is no need to keep notes on what was set.\n\"\"\"\nimport torch\nimport torch.nn as nn\n\n\n# ---- data ----\ndef f1(x):\n    return torch.exp(torch.sin(2 * torch.pi * x))\n\n\ndef f2(x):\n    return torch.exp(3 * x)\n\n\ndef f3(x):\n    return torch.cos(torch.exp(3 * x))\n\n\ndef f3coef5(x):\n    return torch.cos(torch.exp(5 * x))\n\n\nTARGET = f1                 # function that creates the data, torch tensor -> torch tensor\nINTERVAL = (-1.0, 1.0)\nTRAIN_SPACING = \"even\"      # \"even\": evenly spaced on INTERVAL, \"random\": uniform random draws\nN_TRAIN = 201\nN_TEST = 601                # test points are always evenly spaced\n\n# ---- model ----\nWIDTH = 128\nDEPTH = 3                   # number of hidden layers\nACTIVATION = nn.Tanh        # any nn.Module class, e.g. nn.Tanh, nn.ReLU, nn.GELU\n\n# ---- training ----\nEPOCHS = 2400\nLR = 1e-3\n\n# ---- GAD ----\nCOLUMN_ORDER = \"ck_first\"   # order parameters become \"modeled\" in: \"ck_first\" or \"random\"\n                            # \"ck_first\": last layer (the CK features), then all earlier layers\nRCOND = 1e-14               # relative cutoff for singular values\nSEED = 0                    # network init, random training points, column order\n\n# ---- set by run_experiments.py ----\nTARGET = f3coef5\nACTIVATION = nn.ReLU\nCOLUMN_ORDER = 'ck_first'\n"
+}
