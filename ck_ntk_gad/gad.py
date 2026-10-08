@@ -77,13 +77,25 @@ def gad_terms(J_train, J_test, w_train, gamma, cols, rest, rcond=config.RCOND):
     return (f_data, f_alias, f_model), (p_data, p_alias, p_model), A_norm, rank
 
 
-def sweep_sizes(n_train, n_params):
+def sweep_sizes(n_train, n_params, n_ck):
     """Every size up to 2 * n_train, then log-spaced out to all the parameters."""
     dense = min(2 * n_train, n_params + 1)
     sizes = np.arange(1, dense)
     if dense <= n_params:
         sizes = np.concatenate([sizes, np.geomspace(dense, n_params, 60).astype(int)])
-    return np.unique(sizes)
+    return np.unique(np.append(sizes, n_ck))
+
+
+def column_order(n_params, n_ck):
+    """Order in which Jacobian columns (parameters) are moved into the modeled set."""
+    g = torch.Generator().manual_seed(config.SEED)
+    if config.COLUMN_ORDER == "random":
+        return torch.randperm(n_params, generator=g)
+    if config.COLUMN_ORDER == "ck_first":
+        # the readout weights and bias are the last n_ck columns; they are the CK features
+        ck = n_params - n_ck + torch.randperm(n_ck, generator=g)
+        return torch.cat([ck, torch.randperm(n_params - n_ck, generator=g)])
+    raise ValueError(f"COLUMN_ORDER must be 'ck_first' or 'random', got {config.COLUMN_ORDER!r}")
 
 
 def gad_sweep(model, data):
@@ -92,9 +104,9 @@ def gad_sweep(model, data):
     gamma = fit_subset(J_train, data.y_train, data.w_train, torch.arange(n_params))
     f_ntk_test = J_test @ gamma
 
-    g = torch.Generator().manual_seed(config.SEED)
-    order = torch.randperm(n_params, generator=g)
-    sizes = sweep_sizes(len(data.x_train), n_params)
+    n_ck = config.WIDTH + 1
+    order = column_order(n_params, n_ck)
+    sizes = sweep_sizes(len(data.x_train), n_params, n_ck)
     rows = []
     for m in sizes:
         cols, rest = order[:m], order[m:]
@@ -106,14 +118,19 @@ def gad_sweep(model, data):
 
     with torch.no_grad():
         nn_err = test_norm(model(data.x_test) - data.y_test, data.w_test)
+    rows = np.array(rows)
     summary = {
         "n_params": n_params,
+        "n_ck": n_ck,
         "jacobian_rank": torch.linalg.matrix_rank(
             data.w_train.sqrt() * J_train, rtol=config.RCOND).item(),
         "nn_test_error": nn_err,
         "ntk_test_error": test_norm(f_ntk_test - data.y_test, data.w_test),
     }
-    return sizes, np.array(rows), summary
+    if config.COLUMN_ORDER == "ck_first":
+        # modeled = CK, unmodeled = rest of the NTK: the test-norm gap between the two machines
+        summary["ck_vs_ntk_test_error"] = float(rows[sizes == n_ck, 0][0] ** 0.5)
+    return sizes, rows, summary
 
 
 def plot_gad(sizes, rows, summary, run_id):
@@ -124,8 +141,8 @@ def plot_gad(sizes, rows, summary, run_id):
     ax.loglog(sizes, rows[:, 3], "r-",  label=r"$\|\theta_U\|$")
     ax.loglog(sizes, rows[:, 4], "b--", label=r"$\|A\|$")
     ax.axvline(config.N_TRAIN, color="k", ls="--")
-    if summary["jacobian_rank"] != config.N_TRAIN:
-        ax.axvline(summary["jacobian_rank"], color="gray", ls=":")
+    if config.COLUMN_ORDER == "ck_first":
+        ax.axvline(summary["n_ck"], color="gray", ls=":")   # modeled set is exactly the CK
     ax.set_xlabel("number of modeled parameters")
     ax.legend()
     fig.text(0.995, 0.005, run_id, ha="right", va="bottom", fontsize=6, color="gray")
@@ -174,7 +191,7 @@ def main():
     config_source = Path(config.__file__).read_text()
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     run_id = (f"{stamp}_{config.TARGET.__name__}_{config.ACTIVATION.__name__.lower()}"
-              f"_w{config.WIDTH}_d{config.DEPTH}_n{config.N_TRAIN}{config.TRAIN_SPACING}")
+              f"_w{config.WIDTH}_d{config.DEPTH}_n{config.N_TRAIN}{config.TRAIN_SPACING}_{config.COLUMN_ORDER}")
 
     model, data = train.run()
     sizes, rows, summary = gad_sweep(model, data)
