@@ -19,6 +19,11 @@ def f2(x):
 def f3(x):
     return torch.cos(torch.exp(3 * x))
 
+def f3coef3pt5(x):
+    return torch.cos(torch.exp(3.5 * x))
+
+def f3coef4(x):
+    return torch.cos(torch.exp(4 * x))
 
 def f3coef5(x):
     return torch.cos(torch.exp(5 * x))
@@ -28,7 +33,8 @@ TARGET = f1                 # function that creates the data, torch tensor -> to
 INTERVAL = (-1.0, 1.0)
 TRAIN_SPACING = "even"      # "even": evenly spaced on INTERVAL, "random": uniform random draws
 N_TRAIN = 201
-N_TEST = 601                # test points are always evenly spaced
+N_TEST = 601                # evenly spaced test points; any training point not among
+                            # them is added, so the risk covers both test and training
 
 # ---- model ----
 WIDTH = 128

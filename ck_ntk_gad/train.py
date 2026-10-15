@@ -17,6 +17,14 @@ def trap_weights(n_points, a=-1.0, b=1.0):
     return w
 
 
+def trap_weights_uneven(x):
+    dx = x.diff(dim=0)
+    w = torch.zeros_like(x)
+    w[:-1] += dx / 2
+    w[1:] += dx / 2
+    return w
+
+
 def make_data():
     a, b = config.INTERVAL
     if config.TRAIN_SPACING == "even":
@@ -31,6 +39,11 @@ def make_data():
         raise ValueError(f"TRAIN_SPACING must be 'even' or 'random', got {config.TRAIN_SPACING!r}")
     x_test = torch.linspace(a, b, config.N_TEST).unsqueeze(1)
     w_test = trap_weights(config.N_TEST, a, b)
+    # the risk is a generalization error, so it has to see the training points as well
+    off_grid = torch.cdist(x_train, x_test).min(dim=1).values > 1e-12
+    if off_grid.any():
+        x_test = torch.cat([x_test, x_train[off_grid]]).sort(dim=0).values
+        w_test = trap_weights_uneven(x_test)
     return SimpleNamespace(x_train=x_train, y_train=config.TARGET(x_train), w_train=w_train,
                            x_test=x_test, y_test=config.TARGET(x_test), w_test=w_test)
 

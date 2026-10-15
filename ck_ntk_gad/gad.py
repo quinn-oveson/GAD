@@ -7,13 +7,14 @@
 Each run gets its own folder, runs/<time>_<settings>/, holding
 
     gad.png       the GAD plot
+    cancel.png    how aliasing and model insufficiency cancel at the prediction points
     fit.png       the network, CK and NTK fits against the true function
     config.py     verbatim copy of config.py as it was when the run started
     run.json      the same settings as plain values, the git commit, and summary numbers
-    results.npz   the curves in both plots, for replotting without rerunning
+    results.npz   the curves in the plots, for replotting without rerunning
 
 The contents of run.json (config.py source included) are also written into the
-metadata of both plots, so a plot that has been copied out of its folder can still be
+metadata of the plots, so a plot that has been copied out of its folder can still be
 traced back with --config-of.
 """
 import argparse
@@ -69,7 +70,7 @@ def fit_subset(J_tr, target, w, cols, rcond=config.RCOND):
     return torch.linalg.lstsq(A, b, driver="gelsd", rcond=rcond).solution
 
 
-def gad_terms(J_train, J_test, w_train, gamma, cols, rest, rcond=config.RCOND):
+def gad_terms(J_train, J_test, w_train, w_test, gamma, cols, rest, rcond=config.RCOND):
     sw = w_train.sqrt()
     gS, gU = gamma[cols], gamma[rest]
 
@@ -89,7 +90,15 @@ def gad_terms(J_train, J_test, w_train, gamma, cols, rest, rcond=config.RCOND):
     f_data  = J_test[:, cols] @ p_data
     f_alias = J_test[:, cols] @ p_alias
     f_model = J_test[:, rest] @ p_model
-    return (f_data, f_alias, f_model), (p_data, p_alias, p_model), A_norm, rank
+
+    # R = M_PU - M_PM M_TM^+ M_TU maps theta_U to f_alias + f_model; rows weighted so that
+    # its norm is in the test norm
+    R_norm = 0.0
+    if len(rest) > 0:
+        R = w_test.sqrt() * (J_test[:, rest] - (J_test[:, cols] @ Vh.T) @ X)
+        # largest singular value from the small Gram matrix, much cheaper than an SVD of R
+        R_norm = torch.linalg.eigvalsh(R @ R.T)[-1].clamp(min=0).sqrt().item()
+    return (f_data, f_alias, f_model), (p_data, p_alias, p_model), A_norm, rank, R_norm
 
 
 def sweep_sizes(n_train, n_params, n_ck):
@@ -131,11 +140,14 @@ def gad_sweep(model, data):
     rows = []
     for m in sizes:
         cols, rest = order[:m], order[m:]
-        (fd, fa, fm), (pd, pa, pm), A_norm, rank = gad_terms(
-            J_train, J_test, data.w_train, gamma, cols, rest)
+        (fd, fa, fm), (pd, pa, pm), A_norm, rank, R_norm = gad_terms(
+            J_train, J_test, data.w_train, data.w_test, gamma, cols, rest)
         risk = test_norm(fd + fa + fm, data.w_test) ** 2
         rows.append([risk, pd.norm().item(), pa.norm().item(),
-                     pm.norm().item(), A_norm, rank])
+                     pm.norm().item(), A_norm, rank,
+                     test_norm(fd, data.w_test), test_norm(fa, data.w_test),
+                     test_norm(fm, data.w_test), test_norm(fa + fm, data.w_test),
+                     R_norm])
     rows = np.array(rows)
 
     summary = {
@@ -164,13 +176,35 @@ def plot_gad(sizes, rows, summary, run_id):
     ax.loglog(sizes, rows[:, 2], "b-",  label=r"$\|A\theta_U\|$")
     ax.loglog(sizes, rows[:, 3], "r-",  label=r"$\|\theta_U\|$")
     ax.loglog(sizes, rows[:, 4], "b--", label=r"$\|A\|$")
-    ax.axvline(config.N_TRAIN, color="k", ls="--")
-    if config.COLUMN_ORDER == "ck_first":
-        ax.axvline(summary["n_ck"], color="gray", ls=":")   # modeled set is exactly the CK
+    mark_sizes(ax, summary)
     ax.set_xlabel("number of modeled parameters")
     ax.legend()
     stamp(fig, run_id)
     return fig
+
+
+def plot_cancel(sizes, rows, summary, run_id):
+    fig, ax = plt.subplots(figsize=(10, 4.5), layout="constrained")
+    ax.loglog(sizes, rows[:, 8], "r-",  label=r"model insufficiency $\|M_{PU}\theta_U\|$")
+    # dashed so the model insufficiency curve shows through where the two coincide
+    ax.loglog(sizes, rows[:, 7], "b--", label=r"aliasing $\|M_{PM}A\theta_U\|$")
+    ax.loglog(sizes, rows[:, 9], "m-",  label=r"what is left of the two, $\|R\theta_U\|$")
+    ax.loglog(sizes, rows[:, 6], "g-",  label=r"data insufficiency $\|M_{PM}P_N\theta_M\|$")
+    ax.loglog(sizes, rows[:, 0] ** 0.5, "k:", label=r"$\sqrt{\mathrm{risk}}$")
+    ax.loglog(sizes, rows[:, 10], "m--", label=r"$\|R\|$")
+    mark_sizes(ax, summary)
+    ax.set_ylabel("size at the prediction points")
+    ax.set_xlabel("number of modeled parameters")
+    ax.legend(fontsize=8, loc="upper left", bbox_to_anchor=(1.01, 1))
+    stamp(fig, run_id)
+    return fig
+
+
+def mark_sizes(ax, summary):
+    ax.axvline(summary["jacobian_rank"], color="k", ls=":", label="rank of the Jacobian")
+    if config.COLUMN_ORDER == "ck_first":
+        # modeled set is exactly the CK
+        ax.axvline(summary["n_ck"], color="gray", ls=":", label="CK")
 
 
 def plot_fit(data, fits, run_id):
@@ -244,11 +278,15 @@ def main():
     (run_dir / "config.py").write_text(config_source)
     (run_dir / "run.json").write_text(json.dumps(record, indent=2))
     np.savez(run_dir / "results.npz", sizes=sizes, rows=rows,
-             columns=["risk", "data", "alias", "model", "A_norm", "rank"],
+             columns=["risk", "data", "alias", "model", "A_norm", "rank",
+                      "f_data", "f_alias", "f_model", "f_alias_plus_model",
+                      "R_norm"],
              x_test=data.x_test.numpy(), y_test=data.y_test.numpy(),
              **{f"fit_{name}": f.numpy() for name, f in fits.items()})
     metadata = {PNG_KEY: json.dumps(record)}
     plot_gad(sizes, rows, summary, run_id).savefig(run_dir / "gad.png", dpi=200, metadata=metadata)
+    plot_cancel(sizes, rows, summary, run_id).savefig(run_dir / "cancel.png", dpi=200,
+                                                      metadata=metadata)
     plot_fit(data, fits, run_id).savefig(run_dir / "fit.png", dpi=200, metadata=metadata)
 
     print(json.dumps(summary, indent=2))
