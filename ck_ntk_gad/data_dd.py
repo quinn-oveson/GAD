@@ -14,7 +14,8 @@ with theta_U taken from the NTK machine fit to the training data in config.py. D
 uniform weights, which cancel out of A(D) and everything below.
 
 For each of DD_DRAWS draws, D grows from 1 to DD_N_MAX random points, one point at a
-time: uniform on INTERVAL, or without replacement from the N_TEST grid (DD_SAMPLING). At each step the SVD of M_TM(D) gives the leverage scores h_i, and since
+time: uniform on INTERVAL, without replacement from the N_TEST grid, or from the grid in
+bisection order so that every D is roughly evenly spaced (DD_SAMPLING). At each step the SVD of M_TM(D) gives the leverage scores h_i, and since
 dropping point i is a rank-one change,
 
     A(D \\ {i}) - A(D) = -(M_TM^+ e_i) r_i^T / (1 - h_i),    r = (I - U U^T) M_TU
@@ -60,6 +61,19 @@ COLUMNS = ["R_norm", "R_theta", "rank", "sigma_min", "h_max", "h_mean",
            "raw_max", "raw_mean", "fun_max", "fun_mean"]
 
 
+def bisection_order(n_grid):
+    """Grid indices ordered so that every prefix is roughly evenly spaced: the midpoint, then
+    the two ends, then the quarter points, and so on. Each next point is the one farthest
+    from those already chosen (ties go to the left)."""
+    idx = torch.arange(n_grid)
+    order = [n_grid // 2]
+    dist = (idx - order[0]).abs()
+    for _ in range(n_grid - 1):
+        order.append(int(dist.argmax()))
+        dist = torch.minimum(dist, (idx - order[-1]).abs())
+    return torch.tensor(order)
+
+
 def dd_sweep(model, data):
     J_train, J_test = jacobian(model, data.x_train), jacobian(model, data.x_test)
     n_params = J_train.shape[1]
@@ -79,14 +93,17 @@ def dd_sweep(model, data):
         g = torch.Generator().manual_seed(config.SEED + 1 + draw)
         if config.DD_SAMPLING == "uniform":
             x_pool = a + (b - a) * torch.rand(config.DD_N_MAX, 1, generator=g)
-        elif config.DD_SAMPLING == "grid":
+        elif config.DD_SAMPLING in ("grid", "bisect"):
             if config.DD_N_MAX > config.N_TEST:
                 raise ValueError(f"DD_N_MAX = {config.DD_N_MAX} is more than the "
                                  f"{config.N_TEST} grid points")
             grid = torch.linspace(a, b, config.N_TEST).unsqueeze(1)
-            x_pool = grid[torch.randperm(config.N_TEST, generator=g)[:config.DD_N_MAX]]
+            order = (torch.randperm(config.N_TEST, generator=g) if config.DD_SAMPLING == "grid"
+                     else bisection_order(config.N_TEST))
+            x_pool = grid[order[:config.DD_N_MAX]]
         else:
-            raise ValueError(f"DD_SAMPLING must be 'uniform' or 'grid', got {config.DD_SAMPLING!r}")
+            raise ValueError("DD_SAMPLING must be 'uniform', 'grid' or 'bisect', "
+                             f"got {config.DD_SAMPLING!r}")
         J_pool = jacobian(model, x_pool)
         T = J_pool[:, rest]                 # M_TU for the whole pool; D is its first n rows
         T_theta = T @ theta_U
