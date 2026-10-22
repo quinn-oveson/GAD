@@ -58,6 +58,8 @@ RCOND = 1e-14               # relative cutoff for singular values
 SEED = 0                    # network init, random training points, column order
 
 # ---- data double descent (data_dd.py) ----
+DD_SAMPLING = "uniform"     # where the points of D come from: "uniform": uniform random on
+                            # INTERVAL, "grid": without replacement from the N_TEST grid
 DD_N_MAX = 400              # largest sample set D; each D is the previous one plus one
-                            # uniform random point on INTERVAL
+                            # random point ("grid" needs DD_N_MAX <= N_TEST)
 DD_DRAWS = 10               # independent nested sequences; plots show median and 10-90% band

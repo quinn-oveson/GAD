@@ -13,8 +13,8 @@ set is the CK (the last layer), the unmodeled set is every other parameter, and
 with theta_U taken from the NTK machine fit to the training data in config.py. D gets
 uniform weights, which cancel out of A(D) and everything below.
 
-For each of DD_DRAWS draws, D grows from 1 to DD_N_MAX uniform random points, one point
-at a time. At each step the SVD of M_TM(D) gives the leverage scores h_i, and since
+For each of DD_DRAWS draws, D grows from 1 to DD_N_MAX random points, one point at a
+time: uniform on INTERVAL, or without replacement from the N_TEST grid (DD_SAMPLING). At each step the SVD of M_TM(D) gives the leverage scores h_i, and since
 dropping point i is a rank-one change,
 
     A(D \\ {i}) - A(D) = -(M_TM^+ e_i) r_i^T / (1 - h_i),    r = (I - U U^T) M_TU
@@ -23,7 +23,7 @@ for every i at once. Its norm is reported raw and in function space (M_PM times 
 the test norm). A point with h_i = 1 changes the rank when dropped; the formula does not
 hold for it, so it is left out of the max and the mean.
 
-Each run gets its own folder, runs/<time>_<settings>_data_dd/, holding data_dd.png,
+Each run gets its own folder, runs/<time>_<settings>_data_dd_<sampling>/, holding data_dd.png,
 config.py, run.json and results.npz, as in gad.py.
 """
 import argparse
@@ -77,7 +77,16 @@ def dd_sweep(model, data):
     stats = np.full((config.DD_DRAWS, config.DD_N_MAX, len(COLUMNS)), np.nan)
     for draw in range(config.DD_DRAWS):
         g = torch.Generator().manual_seed(config.SEED + 1 + draw)
-        x_pool = a + (b - a) * torch.rand(config.DD_N_MAX, 1, generator=g)
+        if config.DD_SAMPLING == "uniform":
+            x_pool = a + (b - a) * torch.rand(config.DD_N_MAX, 1, generator=g)
+        elif config.DD_SAMPLING == "grid":
+            if config.DD_N_MAX > config.N_TEST:
+                raise ValueError(f"DD_N_MAX = {config.DD_N_MAX} is more than the "
+                                 f"{config.N_TEST} grid points")
+            grid = torch.linspace(a, b, config.N_TEST).unsqueeze(1)
+            x_pool = grid[torch.randperm(config.N_TEST, generator=g)[:config.DD_N_MAX]]
+        else:
+            raise ValueError(f"DD_SAMPLING must be 'uniform' or 'grid', got {config.DD_SAMPLING!r}")
         J_pool = jacobian(model, x_pool)
         T = J_pool[:, rest]                 # M_TU for the whole pool; D is its first n rows
         T_theta = T @ theta_U
@@ -171,7 +180,8 @@ def main():
     config_source = Path(config.__file__).read_text()
     now = datetime.now().strftime("%Y%m%d-%H%M%S")
     run_id = (f"{now}_{config.TARGET.__name__}_{config.ACTIVATION.__name__.lower()}"
-              f"_w{config.WIDTH}_d{config.DEPTH}_n{config.N_TRAIN}{config.TRAIN_SPACING}_data_dd")
+              f"_w{config.WIDTH}_d{config.DEPTH}_n{config.N_TRAIN}{config.TRAIN_SPACING}"
+              f"_data_dd_{config.DD_SAMPLING}")
 
     model, data = train.run()
     stats, summary = dd_sweep(model, data)
