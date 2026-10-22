@@ -169,11 +169,13 @@ def stamp(fig, run_id):
     fig.text(0.995, 0.005, run_id, ha="right", va="bottom", fontsize=6, color="gray")
 
 
-def plot_title(what):
+def plot_title(what, detail=None):
     tex = getattr(config.TARGET, "tex", None)
     target = f"$f(x) = {tex}$" if tex else config.TARGET.__name__
-    order = {"ck_first": "CK-first"}.get(config.COLUMN_ORDER, config.COLUMN_ORDER)
-    return f"{what}: {target}, {config.ACTIVATION.__name__}, {order} column order"
+    if detail is None:
+        order = {"ck_first": "CK-first"}.get(config.COLUMN_ORDER, config.COLUMN_ORDER)
+        detail = f"{order} column order"
+    return f"{what}: {target}, {config.ACTIVATION.__name__}, {detail}"
 
 
 def plot_gad(sizes, rows, summary, run_id):

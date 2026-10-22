@@ -56,3 +56,8 @@ COLUMN_ORDER = "ck_first"   # order parameters become "modeled" in: "ck_first" o
                             # "ck_first": last layer (the CK features), then all earlier layers
 RCOND = 1e-14               # relative cutoff for singular values
 SEED = 0                    # network init, random training points, column order
+
+# ---- data double descent (data_dd.py) ----
+DD_N_MAX = 400              # largest sample set D; each D is the previous one plus one
+                            # uniform random point on INTERVAL
+DD_DRAWS = 10               # independent nested sequences; plots show median and 10-90% band
