@@ -10,23 +10,29 @@ import torch.nn as nn
 # ---- data ----
 def f1(x):
     return torch.exp(torch.sin(2 * torch.pi * x))
+f1.tex = r"e^{\sin(2\pi x)}"  # LaTeX for the plot titles
 
 
 def f2(x):
     return torch.exp(3 * x)
+f2.tex = r"e^{3x}"
 
 
 def f3(x):
     return torch.cos(torch.exp(3 * x))
+f3.tex = r"\cos(e^{3x})"
 
 def f3coef3pt5(x):
     return torch.cos(torch.exp(3.5 * x))
+f3coef3pt5.tex = r"\cos(e^{3.5x})"
 
 def f3coef4(x):
     return torch.cos(torch.exp(4 * x))
+f3coef4.tex = r"\cos(e^{4x})"
 
 def f3coef5(x):
     return torch.cos(torch.exp(5 * x))
+f3coef5.tex = r"\cos(e^{5x})"
 
 
 TARGET = f1                 # function that creates the data, torch tensor -> torch tensor

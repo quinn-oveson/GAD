@@ -169,6 +169,13 @@ def stamp(fig, run_id):
     fig.text(0.995, 0.005, run_id, ha="right", va="bottom", fontsize=6, color="gray")
 
 
+def plot_title(what):
+    tex = getattr(config.TARGET, "tex", None)
+    target = f"$f(x) = {tex}$" if tex else config.TARGET.__name__
+    order = {"ck_first": "CK-first"}.get(config.COLUMN_ORDER, config.COLUMN_ORDER)
+    return f"{what}: {target}, {config.ACTIVATION.__name__}, {order} column order"
+
+
 def plot_gad(sizes, rows, summary, run_id):
     fig, ax = plt.subplots()
     ax.loglog(sizes, rows[:, 0], "k-",  label="risk")
@@ -178,6 +185,7 @@ def plot_gad(sizes, rows, summary, run_id):
     ax.loglog(sizes, rows[:, 4], "b--", label=r"$\|A\|$")
     mark_sizes(ax, summary)
     ax.set_xlabel("number of modeled parameters")
+    ax.set_title(plot_title("GAD sweep"), fontsize=10)
     ax.legend()
     stamp(fig, run_id)
     return fig
@@ -188,20 +196,21 @@ def plot_cancel(sizes, rows, summary, run_id):
     ax.loglog(sizes, rows[:, 8], "r-",  label=r"model insufficiency $\|M_{PU}\theta_U\|$")
     # dashed so the model insufficiency curve shows through where the two coincide
     ax.loglog(sizes, rows[:, 7], "b--", label=r"aliasing $\|M_{PM}A\theta_U\|$")
-    ax.loglog(sizes, rows[:, 9], "m-",  label=r"what is left of the two, $\|R\theta_U\|$")
+    ax.loglog(sizes, rows[:, 9], "-", color="tab:orange",  label=r"what is left of the two, $\|R\theta_U\|$")
     ax.loglog(sizes, rows[:, 6], "g-",  label=r"data insufficiency $\|M_{PM}P_N\theta_M\|$")
     ax.loglog(sizes, rows[:, 0] ** 0.5, "k:", label=r"$\sqrt{\mathrm{risk}}$")
-    ax.loglog(sizes, rows[:, 10], "m--", label=r"$\|R\|$")
+    ax.loglog(sizes, rows[:, 10], "--", color="tab:orange", label=r"$\|R\|$")
     mark_sizes(ax, summary)
     ax.set_ylabel("size at the prediction points")
     ax.set_xlabel("number of modeled parameters")
+    ax.set_title(plot_title("Cancellation of aliasing and model insufficiency"))
     ax.legend(fontsize=8, loc="upper left", bbox_to_anchor=(1.01, 1))
     stamp(fig, run_id)
     return fig
 
 
 def mark_sizes(ax, summary):
-    ax.axvline(summary["jacobian_rank"], color="k", ls=":", label="rank of the Jacobian")
+    ax.axvline(summary["jacobian_rank"], color="k", ls="-.", label="rank of the Jacobian")
     if config.COLUMN_ORDER == "ck_first":
         # modeled set is exactly the CK
         ax.axvline(summary["n_ck"], color="gray", ls=":", label="CK")
