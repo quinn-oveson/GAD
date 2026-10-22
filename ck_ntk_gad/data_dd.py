@@ -182,8 +182,8 @@ def plot_dd(stats, summary, run_id):
     ax0.set_yscale("log")
     ax0.legend(fontsize=8)
 
-    band(ax1, n, col["R_theta"], "-", "lightseagreen", r"$\|R\theta_U\|$")
-    band(ax1, n, col["R_norm"], "--", "lightseagreen", r"$\|R\|$")
+    band(ax1, n, col["R_theta"], "-", "teal", r"$\|R\theta_U\|$")
+    band(ax1, n, col["R_norm"], "--", "teal", r"$\|R\|$")
     ax1.set_yscale("log")
     ax1.set_ylabel("size at the prediction points")
     ax1.legend(fontsize=8)
