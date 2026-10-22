@@ -18,9 +18,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 
 GRID = {
-    "TARGET": ["f1", "f2", "f3"],                   # functions defined in config.py
-    "ACTIVATION": ["nn.Tanh", "nn.ReLU"],
-    "DD_SAMPLING": ['"uniform"', '"bisect"'],
+    "TARGET": ["f3"],                   # functions defined in config.py
+    "ACTIVATION": ["nn.LeakyReLU", "nn.Softplus"],
+    "DD_SAMPLING": ['"grid"', '"bisect"'],
     # any other setting works too, e.g.
     # "DD_N_MAX": ["400", "601"],
     # "RCOND": ["1e-14", "1e-10"],
