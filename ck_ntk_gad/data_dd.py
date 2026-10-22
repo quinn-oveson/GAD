@@ -57,7 +57,8 @@ import config
 import train
 from gad import PNG_KEY, config_values, fit_subset, git_state, jacobian, plot_title, stamp
 
-COLUMNS = ["R_norm", "R_theta", "rank", "sigma_min", "h_max", "h_mean",
+COLUMNS = ["risk", "data", "alias", "model", "A_norm",
+           "R_norm", "R_theta", "rank", "sigma_min", "h_max", "h_mean",
            "raw_max", "raw_mean", "fun_max", "fun_mean"]
 
 
@@ -80,7 +81,7 @@ def dd_sweep(model, data):
     n_ck = config.WIDTH + 1
     ck, rest = slice(n_params - n_ck, n_params), slice(0, n_params - n_ck)
     gamma = fit_subset(J_train, data.y_train, data.w_train, torch.arange(n_params))
-    theta_U = gamma[rest]
+    theta_M, theta_U = gamma[ck], gamma[rest]
 
     sw_test = data.w_test.sqrt()
     QM = sw_test * J_test[:, ck]            # weighted M_PM
@@ -119,9 +120,17 @@ def dd_sweep(model, data):
             B_pinv = (Vh.T / s) @ U.T       # M_TM(D)^+
             K = QM @ B_pinv                 # weighted M_PM M_TM(D)^+
 
+            # the GAD terms, as in gad.gad_terms
+            p_data = theta_M - Vh.T @ (Vh @ theta_M)        # P_N theta_M
+            p_alias = -B_pinv @ T_theta[:n]                 # -A theta_U
+            X = (U.T @ Tc[:n]) / s[:, None]                 # A = V X, so ||A|| = ||X||
+            A_norm = torch.linalg.eigvalsh(X @ X.T)[-1].clamp(min=0).sqrt().item()
+            f_alias_model = Q_theta - K @ T_theta[:n]       # R theta_U at the test points
+            risk = ((QM @ p_data + f_alias_model) ** 2).sum().item()
+
             Rc = Qc - K @ Tc[:n]
             R_norm = torch.linalg.eigvalsh(Rc @ Rc.T)[-1].clamp(min=0).sqrt().item()
-            R_theta = (Q_theta - K @ T_theta[:n]).norm().item()
+            R_theta = f_alias_model.norm().item()
 
             # leave-one-out changes in A, all points at once
             h = (U ** 2).sum(dim=1)
@@ -132,7 +141,8 @@ def dd_sweep(model, data):
             loo = ([raw.max().item(), raw.mean().item(), fun.max().item(), fun.mean().item()]
                    if ok.any() else [np.nan] * 4)
 
-            stats[draw, n - 1] = [R_norm, R_theta, len(s), s[-1].item(),
+            stats[draw, n - 1] = [risk, p_data.norm().item(), p_alias.norm().item(),
+                                  theta_U.norm().item(), A_norm, R_norm, R_theta, len(s), s[-1].item(),
                                   h.max().item(), h.mean().item(), *loo]
         print(f"draw {draw + 1}/{config.DD_DRAWS} done", flush=True)
 
@@ -160,33 +170,33 @@ def band(ax, n, values, style, color, label):
 def plot_dd(stats, summary, run_id):
     n = np.arange(1, stats.shape[1] + 1)
     col = {name: stats[:, :, i] for i, name in enumerate(COLUMNS)}
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 8), sharex=True, layout="constrained")
+    fig, (ax0, ax1, ax2) = plt.subplots(3, 1, figsize=(9, 11), sharex=True,
+                                        layout="constrained")
 
-    band(ax1, n, col["R_theta"], "-", "k", r"$\|R\theta_U\|$")
-    band(ax1, n, col["R_norm"], "--", "k", r"$\|R\|$")
+    # same colors as the GAD plot in gad.py
+    band(ax0, n, col["risk"], "-", "k", "risk")
+    band(ax0, n, col["data"], "-", "g", r"$\|P_N\theta_M\|$")
+    band(ax0, n, col["alias"], "-", "b", r"$\|A\theta_U\|$")
+    band(ax0, n, col["model"], "-", "r", r"$\|\theta_U\|$")
+    band(ax0, n, col["A_norm"], "--", "b", r"$\|A\|$")
+    ax0.set_yscale("log")
+    ax0.legend(fontsize=8)
+
+    band(ax1, n, col["R_theta"], "-", "lightseagreen", r"$\|R\theta_U\|$")
+    band(ax1, n, col["R_norm"], "--", "lightseagreen", r"$\|R\|$")
     ax1.set_yscale("log")
     ax1.set_ylabel("size at the prediction points")
+    ax1.legend(fontsize=8)
 
     dA = r"(A(D\setminus i) - A(D))"
-    band(ax2, n, col["raw_max"], "-", "tab:blue", rf"$\mathrm{{max}}_i\,\|{dA}\|$")
-    band(ax2, n, col["raw_mean"], "-", "tab:green", rf"$\mathrm{{mean}}_i\,\|{dA}\|$")
-    band(ax2, n, col["fun_max"], "--", "tab:blue", rf"$\mathrm{{max}}_i\,\|M_{{PM}}{dA}\|$")
-    band(ax2, n, col["fun_mean"], "--", "tab:green", rf"$\mathrm{{mean}}_i\,\|M_{{PM}}{dA}\|$")
+    band(ax2, n, col["raw_max"], "-", "orangered", rf"$\mathrm{{max}}_i\,\|{dA}\|$")
+    band(ax2, n, col["raw_mean"], "-", "blueviolet", rf"$\mathrm{{mean}}_i\,\|{dA}\|$")
+    band(ax2, n, col["fun_max"], "--", "orangered", rf"$\mathrm{{max}}_i\,\|M_{{PM}}{dA}\|$")
+    band(ax2, n, col["fun_mean"], "--", "blueviolet", rf"$\mathrm{{mean}}_i\,\|M_{{PM}}{dA}\|$")
     ax2.set_yscale("log")
     ax2.set_ylabel("leave-one-out change in $A$")
     ax2.set_xlabel("number of sample points $|D|$")
-    lev = ax2.twinx()
-    band(lev, n, col["h_max"], "-", "gray", r"$\mathrm{max}_i\, h_i$")
-    band(lev, n, col["h_mean"], ":", "gray", r"$\mathrm{mean}_i\, h_i$")
-    lev.set_ylim(0, 1.05)
-    lev.set_ylabel("leverage")
-
-    for ax in (ax1, ax2):
-        ax.axvline(summary["ck_rank_test"], color="k", ls="-.", label="rank of the CK features")
-    ax1.legend(fontsize=8)
-    handles = ax2.get_legend_handles_labels()
-    lev_handles = lev.get_legend_handles_labels()
-    ax2.legend(handles[0] + lev_handles[0], handles[1] + lev_handles[1], fontsize=8)
+    ax2.legend(fontsize=8)
     fig.suptitle(plot_title("Data double descent", "CK modeled"))
     stamp(fig, run_id)
     return fig
