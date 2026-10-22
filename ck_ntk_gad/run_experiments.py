@@ -15,9 +15,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 
-TARGETS = ["f1", "f2", "f3", "f3coef4", "f3coef3pt5"]     # functions defined in config.py
-ACTIVATIONS = ["nn.LeakyReLU", "nn.Softplus"]
-COLUMN_ORDERS = ["ck_first", "random"]
+TARGETS = ["f1", "f3"]     # functions defined in config.py
+ACTIVATIONS = ["nn.ReLU", "nn.Tanh"]
+COLUMN_ORDERS = ["ck_first"]
 
 base = (HERE / "config.py").read_text()
 targets = sys.argv[1:] or TARGETS
