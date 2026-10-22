@@ -15,7 +15,10 @@ uniform weights, which cancel out of A(D) and everything below.
 
 For each of DD_DRAWS draws, D grows from 1 to DD_N_MAX random points, one point at a
 time: uniform on INTERVAL, without replacement from the N_TEST grid, or from the grid in
-bisection order so that every D is roughly evenly spaced (DD_SAMPLING). At each step the SVD of M_TM(D) gives the leverage scores h_i, and since
+bisection order so that every D is roughly evenly spaced (DD_SAMPLING). With "bisect" and
+evenly spaced training points on the grid, the training points come first, so D is exactly
+the training set at |D| = N_TRAIN. At each step the SVD of M_TM(D) gives the leverage
+scores h_i, and since
 dropping point i is a rank-one change,
 
     A(D \\ {i}) - A(D) = -(M_TM^+ e_i) r_i^T / (1 - h_i),    r = (I - U U^T) M_TU
@@ -62,17 +65,32 @@ COLUMNS = ["risk", "data", "alias", "model", "A_norm",
            "raw_max", "raw_mean", "fun_max", "fun_mean"]
 
 
-def bisection_order(n_grid):
+def bisection_order(n_grid, first=None):
     """Grid indices ordered so that every prefix is roughly evenly spaced: the midpoint, then
     the two ends, then the quarter points, and so on. Each next point is the one farthest
-    from those already chosen (ties go to the left)."""
+    from those already chosen (ties go to the left). If `first` is given, those indices
+    come first, in bisection order among themselves, then the rest, in bisection order
+    among themselves, so that the points added after `first` are spread out too."""
+    def bisect(points):
+        order = [int(points[len(points) // 2])]
+        dist = (points - order[0]).abs()
+        for _ in range(len(points) - 1):
+            order.append(int(points[dist.argmax()]))
+            dist = torch.minimum(dist, (points - order[-1]).abs())
+        return order
+
     idx = torch.arange(n_grid)
-    order = [n_grid // 2]
-    dist = (idx - order[0]).abs()
-    for _ in range(n_grid - 1):
-        order.append(int(dist.argmax()))
-        dist = torch.minimum(dist, (idx - order[-1]).abs())
-    return torch.tensor(order)
+    if first is None:
+        return torch.tensor(bisect(idx))
+    rest = idx[~torch.isin(idx, first)]
+    return torch.tensor(bisect(first) + bisect(rest))
+
+
+def train_grid_indices():
+    """Indices of the training points in the N_TEST grid, or None if they are not on it."""
+    if config.TRAIN_SPACING != "even" or (config.N_TEST - 1) % (config.N_TRAIN - 1):
+        return None
+    return torch.arange(0, config.N_TEST, (config.N_TEST - 1) // (config.N_TRAIN - 1))
 
 
 def dd_sweep(model, data):
@@ -100,7 +118,7 @@ def dd_sweep(model, data):
                                  f"{config.N_TEST} grid points")
             grid = torch.linspace(a, b, config.N_TEST).unsqueeze(1)
             order = (torch.randperm(config.N_TEST, generator=g) if config.DD_SAMPLING == "grid"
-                     else bisection_order(config.N_TEST))
+                     else bisection_order(config.N_TEST, first=train_grid_indices()))
             x_pool = grid[order[:config.DD_N_MAX]]
         else:
             raise ValueError("DD_SAMPLING must be 'uniform', 'grid' or 'bisect', "
@@ -153,6 +171,9 @@ def dd_sweep(model, data):
             J_test[:, ck] @ fit_subset(J_train, data.y_train, data.w_train,
                                        torch.arange(n_params)[ck]) - data.y_test, data.w_test),
         "ntk_test_error": train.test_norm(J_test @ gamma - data.y_test, data.w_test),
+        # with bisect sampling and training points on the grid, D is the training set here
+        "train_set_at": (config.N_TRAIN if config.DD_SAMPLING == "bisect"
+                         and train_grid_indices() is not None else None),
     }
     return stats, summary
 
@@ -180,7 +201,6 @@ def plot_dd(stats, summary, run_id):
     band(ax0, n, col["model"], "-", "r", r"$\|\theta_U\|$")
     band(ax0, n, col["A_norm"], "--", "b", r"$\|A\|$")
     ax0.set_yscale("log")
-    ax0.legend(fontsize=8)
 
     band(ax1, n, col["R_theta"], "-", "teal", r"$\|R\theta_U\|$")
     band(ax1, n, col["R_norm"], "--", "teal", r"$\|R\|$")
@@ -196,6 +216,10 @@ def plot_dd(stats, summary, run_id):
     ax2.set_yscale("log")
     ax2.set_ylabel("leave-one-out change in $A$")
     ax2.set_xlabel("number of sample points $|D|$")
+    if summary.get("train_set_at"):
+        for ax in (ax0, ax1, ax2):
+            ax.axvline(summary["train_set_at"], color="r", ls="--", label="$D$ = training set")
+    ax0.legend(fontsize=8)
     ax2.legend(fontsize=8)
     fig.suptitle(plot_title("Data double descent", "CK modeled"))
     stamp(fig, run_id)
