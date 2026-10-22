@@ -92,13 +92,29 @@ def gad_terms(J_train, J_test, w_train, w_test, gamma, cols, rest, rcond=config.
     f_model = J_test[:, rest] @ p_model
 
     # R = M_PU - M_PM M_TM^+ M_TU maps theta_U to f_alias + f_model; rows weighted so that
-    # its norm is in the test norm
-    R_norm = 0.0
+    # its norm is in the test norm. R splits into
+    #   approximation  (I - Pi) M_PU          what no modeled weights can reproduce at P
+    #   sampling       M_PM (A_P - A)          aliasing from T minus aliasing from P itself
+    # with Pi the projector onto range(M_PM) and A_P = M_PM^+ M_PU. The two are orthogonal
+    # in the test norm (up to the singular values RCOND cuts).
+    R_split = dict.fromkeys(["R", "approx", "sampling"], 0.0)
+    R_theta_split = dict.fromkeys(["approx", "sampling"], 0.0)
     if len(rest) > 0:
-        R = w_test.sqrt() * (J_test[:, rest] - (J_test[:, cols] @ Vh.T) @ X)
-        # largest singular value from the small Gram matrix, much cheaper than an SVD of R
-        R_norm = torch.linalg.eigvalsh(R @ R.T)[-1].clamp(min=0).sqrt().item()
-    return (f_data, f_alias, f_model), (p_data, p_alias, p_model), A_norm, rank, R_norm
+        sw_test = w_test.sqrt()
+        R = sw_test * (J_test[:, rest] - (J_test[:, cols] @ Vh.T) @ X)
+        Up, sp, _ = torch.linalg.svd(sw_test * J_test[:, cols], full_matrices=False)
+        Up = Up[:, sp > rcond * sp[0]]
+        Q = sw_test * J_test[:, rest]
+        R_approx = Q - Up @ (Up.T @ Q)
+        for name, op in [("R", R), ("approx", R_approx), ("sampling", R - R_approx)]:
+            # largest singular value from the small Gram matrix, much cheaper than an SVD
+            R_split[name] = torch.linalg.eigvalsh(op @ op.T)[-1].clamp(min=0).sqrt().item()
+        Q_gU = Q @ gU
+        approx_gU = Q_gU - Up @ (Up.T @ Q_gU)
+        R_theta_split["approx"] = approx_gU.norm().item()
+        R_theta_split["sampling"] = (sw_test * (f_alias + f_model) - approx_gU).norm().item()
+    return ((f_data, f_alias, f_model), (p_data, p_alias, p_model), A_norm, rank,
+            R_split, R_theta_split)
 
 
 def sweep_sizes(n_train, n_params, n_ck):
@@ -140,14 +156,15 @@ def gad_sweep(model, data):
     rows = []
     for m in sizes:
         cols, rest = order[:m], order[m:]
-        (fd, fa, fm), (pd, pa, pm), A_norm, rank, R_norm = gad_terms(
+        (fd, fa, fm), (pd, pa, pm), A_norm, rank, R_split, R_theta_split = gad_terms(
             J_train, J_test, data.w_train, data.w_test, gamma, cols, rest)
         risk = test_norm(fd + fa + fm, data.w_test) ** 2
         rows.append([risk, pd.norm().item(), pa.norm().item(),
                      pm.norm().item(), A_norm, rank,
                      test_norm(fd, data.w_test), test_norm(fa, data.w_test),
                      test_norm(fm, data.w_test), test_norm(fa + fm, data.w_test),
-                     R_norm])
+                     R_split["R"], R_split["approx"], R_split["sampling"],
+                     R_theta_split["approx"], R_theta_split["sampling"]])
     rows = np.array(rows)
 
     summary = {
@@ -179,16 +196,37 @@ def plot_title(what, detail=None):
 
 
 def plot_gad(sizes, rows, summary, run_id):
-    fig, ax = plt.subplots()
+    has_split = rows.shape[1] > 11     # runs saved before the R split have no such columns
+    if has_split:
+        fig, (ax, ax2) = plt.subplots(2, 1, figsize=(8, 9), sharex=True, layout="constrained")
+    else:
+        fig, ax = plt.subplots()
     ax.loglog(sizes, rows[:, 0], "k-",  label="risk")
     ax.loglog(sizes, rows[:, 1], "g-",  label=r"$\|P_N\theta_M\|$")
     ax.loglog(sizes, rows[:, 2], "b-",  label=r"$\|A\theta_U\|$")
     ax.loglog(sizes, rows[:, 3], "r-",  label=r"$\|\theta_U\|$")
     ax.loglog(sizes, rows[:, 4], "b--", label=r"$\|A\|$")
     mark_sizes(ax, summary)
-    ax.set_xlabel("number of modeled parameters")
     ax.set_title(plot_title("GAD sweep"), fontsize=10)
     ax.legend()
+    if has_split:
+        # R is drawn wide and underneath: it sits on whichever of its two terms is larger
+        wide = dict(lw=3.5, zorder=1)
+        ax2.loglog(sizes, rows[:, 10], ":", color="darkviolet", **wide, label=r"$\|R\|$")
+        ax2.loglog(sizes, rows[:, 9], "-", color="darkviolet", **wide, label=r"$\|R\theta_U\|$")
+        ax2.loglog(sizes, rows[:, 12], ":", color="dodgerblue",
+                   label=r"sampling $\|M_{PM}(A_P - A)\|$")
+        ax2.loglog(sizes, rows[:, 14], "-", color="dodgerblue",
+                   label=r"sampling $\|M_{PM}(A_P - A)\theta_U\|$")
+        ax2.loglog(sizes, rows[:, 11], ":", color="tomato",
+                   label=r"approximation $\|(I - \Pi)M_{PU}\|$")
+        ax2.loglog(sizes, rows[:, 13], "-", color="tomato",
+                   label=r"approximation $\|(I - \Pi)M_{PU}\theta_U\|$")
+        mark_sizes(ax2, summary)
+        ax2.set_ylabel("size at the prediction points")
+        ax2.legend(fontsize=8)
+        ax = ax2
+    ax.set_xlabel("number of modeled parameters")
     stamp(fig, run_id)
     return fig
 
@@ -291,7 +329,8 @@ def main():
     np.savez(run_dir / "results.npz", sizes=sizes, rows=rows,
              columns=["risk", "data", "alias", "model", "A_norm", "rank",
                       "f_data", "f_alias", "f_model", "f_alias_plus_model",
-                      "R_norm"],
+                      "R_norm", "R_approx_norm", "R_sampling_norm",
+                      "f_approx", "f_sampling"],
              x_test=data.x_test.numpy(), y_test=data.y_test.numpy(),
              **{f"fit_{name}": f.numpy() for name, f in fits.items()})
     metadata = {PNG_KEY: json.dumps(record)}
