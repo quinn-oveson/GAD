@@ -179,6 +179,7 @@ def plot_dd(stats, summary, run_id):
     band(ax0, n, col["alias"], "-", "b", r"$\|A\theta_U\|$")
     band(ax0, n, col["model"], "-", "r", r"$\|\theta_U\|$")
     band(ax0, n, col["A_norm"], "--", "b", r"$\|A\|$")
+    ax0.axvline(summary["ck_rank_test"], color="k", ls="-.", label="rank of the CK features")
     ax0.set_yscale("log")
     ax0.legend(fontsize=8)
 
